@@ -22,6 +22,18 @@ assert(command_palette.state_init(&palette) == nil)
 defer command_palette.state_destroy(&palette)
 ```
 
+Applications can set smaller match-sorter virtual-memory reservations:
+
+```odin
+import "core:mem"
+
+assert(command_palette.state_init(
+	&palette,
+	search_reserve_size = 64 * mem.Megabyte,
+	search_commit_size = 64 * mem.Kilobyte,
+) == nil)
+```
+
 Each entry contains one context condition. The application defines the meaning of each bit.
 
 ```odin
@@ -47,7 +59,11 @@ The default shortcut is Ctrl-K. Supply `Config.shortcut` to use another ASCII ke
 
 ## Ownership
 
-`open` copies every entry string and keyword. The caller can release its snapshot after the call. Results and their entry pointers remain valid until the next state mutation.
+`open` copies every entry string and keyword into one session arena. The caller can release its snapshot after the call.
+
+Results and their entry pointers remain valid until the next state mutation.
+
+`close` resets the session arena and releases its extra blocks. Query bytes, visible results, and ranked indices retain their buffer capacity for the next session.
 
 One state supports sequential searches. Use one state per thread. The package owns one match-sorter search context and releases it in `state_destroy`.
 

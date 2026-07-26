@@ -1,5 +1,6 @@
 package command_palette
 
+import "core:mem"
 import "core:testing"
 
 context_mask :: proc(bit: u64) -> Context_Mask {
@@ -144,6 +145,76 @@ query_and_entry_data_are_owned_by_state_test :: proc(t: ^testing.T) {
 	set_query(&state, string(query_input))
 	query_input[0] = 'x'
 	testing.expect_value(t, query(&state), "sou")
+}
+
+@(test)
+session_arena_resets_and_releases_extra_blocks_test :: proc(t: ^testing.T) {
+	state: State
+	testing.expect(t, state_init(&state) == nil)
+	defer state_destroy(&state)
+	initial_reserved := state.session.total_reserved
+	large_title := make([]u8, int(2 * mem.Megabyte))
+	defer delete(large_title)
+	for &value in large_title {value = 'a'}
+	open(&state, []Entry{entry(1, string(large_title))}, 0)
+	testing.expect(t, state.session.total_used > 0)
+	testing.expect(t, state.session.total_reserved > initial_reserved)
+	close(&state)
+	testing.expect_value(t, state.session.total_used, uint(0))
+	testing.expect_value(t, state.session.total_reserved, initial_reserved)
+	open(&state, []Entry{entry(2, "Reopened")}, 0)
+	testing.expect_value(t, visible_results(&state)[0].entry.id, Entry_ID(2))
+}
+
+@(test)
+query_results_and_ranked_indices_reuse_capacity_test :: proc(t: ^testing.T) {
+	state: State
+	testing.expect(t, state_init(&state) == nil)
+	defer state_destroy(&state)
+	entries := []Entry{
+		entry(1, "hello"),
+		entry(2, "hey"),
+		entry(3, "help"),
+		entry(4, "sup"),
+	}
+	open(&state, entries, 0)
+	results_buffer := raw_data(state.results[:])
+	results_capacity := cap(state.results)
+	set_query(&state, "h")
+	set_query(&state, "hello")
+	query_buffer := raw_data(state.query_bytes[:])
+	query_capacity := cap(state.query_bytes)
+	ranked_buffer := raw_data(state.ranked_indices[:])
+	ranked_capacity := cap(state.ranked_indices)
+	set_query(&state, "he")
+	testing.expect(t, raw_data(state.results[:]) == results_buffer)
+	testing.expect_value(t, cap(state.results), results_capacity)
+	testing.expect(t, raw_data(state.query_bytes[:]) == query_buffer)
+	testing.expect_value(t, cap(state.query_bytes), query_capacity)
+	testing.expect(t, raw_data(state.ranked_indices[:]) == ranked_buffer)
+	testing.expect_value(t, cap(state.ranked_indices), ranked_capacity)
+	close(&state)
+	testing.expect_value(t, len(state.query_bytes), 0)
+	testing.expect_value(t, cap(state.query_bytes), query_capacity)
+	testing.expect_value(t, len(state.results), 0)
+	testing.expect_value(t, cap(state.results), results_capacity)
+	testing.expect_value(t, len(state.ranked_indices), 0)
+	testing.expect_value(t, cap(state.ranked_indices), ranked_capacity)
+}
+
+@(test)
+custom_search_reservation_sizes_are_applied_test :: proc(t: ^testing.T) {
+	state: State
+	reserve_size := uint(64 * mem.Megabyte)
+	commit_size := uint(64 * mem.Kilobyte)
+	testing.expect(t, state_init(
+		&state,
+		search_reserve_size = reserve_size,
+		search_commit_size = commit_size,
+	) == nil)
+	defer state_destroy(&state)
+	testing.expect_value(t, state.search.scratch.total_reserved, reserve_size)
+	testing.expect_value(t, state.search.scratch.curr_block.committed, commit_size)
 }
 
 @(test)

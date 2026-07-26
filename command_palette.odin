@@ -2,6 +2,7 @@ package command_palette
 
 import "core:mem"
 import "core:strings"
+import mem_virtual "core:mem/virtual"
 import match_sorter "match_sorter:."
 
 Entry_ID :: distinct u64
@@ -47,13 +48,17 @@ Config :: struct {
 }
 
 DEFAULT_SHORTCUT :: Shortcut{key = 'k', modifiers = {.Control}}
+SESSION_MINIMUM_BLOCK_SIZE :: uint(mem.Megabyte)
+SESSION_COMMIT_SIZE :: uint(64 * mem.Kilobyte)
 
 State :: struct {
 	allocator:      mem.Allocator,
+	session:        mem_virtual.Arena,
 	search:         match_sorter.Search_Context,
 	entries:        [dynamic]Entry,
 	results:        [dynamic]Result,
-	query_text:     string,
+	query_bytes:    [dynamic]u8,
+	ranked_indices: [dynamic]int,
 	active_context: Context_Mask,
 	selected:       int,
 	open:           bool,
@@ -83,35 +88,48 @@ shortcut_matches :: proc(config: Config, key: u8, modifiers: Modifier_Set) -> bo
 	return normalized == shortcut_key && modifiers == shortcut.modifiers
 }
 
-state_init :: proc(state: ^State, allocator := context.allocator) -> mem.Allocator_Error {
+state_init :: proc(
+	state: ^State,
+	allocator := context.allocator,
+	search_reserve_size := uint(mem.Gigabyte),
+	search_commit_size := uint(mem.Megabyte),
+) -> mem.Allocator_Error {
 	assert(state != nil)
 	state^ = State{allocator = allocator, selected = -1}
-	state.entries = make([dynamic]Entry, allocator)
 	state.results = make([dynamic]Result, allocator)
-	return match_sorter.search_context_init(&state.search)
-}
-
-delete_entry :: proc(entry: ^Entry, allocator: mem.Allocator) {
-	delete(entry.title, allocator)
-	delete(entry.subtitle, allocator)
-	delete(entry.category, allocator)
-	delete(entry.unavailable_reason, allocator)
-	for keyword in entry.keywords {delete(keyword, allocator)}
-	delete(entry.keywords, allocator)
-	entry^ = {}
-}
-
-clear_entries :: proc(state: ^State) {
-	for &entry in state.entries {delete_entry(&entry, state.allocator)}
-	clear(&state.entries)
+	state.query_bytes = make([dynamic]u8, allocator)
+	state.ranked_indices = make([dynamic]int, allocator)
+	if error := mem_virtual.arena_init_growing(&state.session, SESSION_MINIMUM_BLOCK_SIZE); error != nil {
+		delete(state.results)
+		delete(state.query_bytes)
+		delete(state.ranked_indices)
+		state^ = {}
+		return error
+	}
+	state.session.minimum_block_size = SESSION_MINIMUM_BLOCK_SIZE
+	state.session.default_commit_size = SESSION_COMMIT_SIZE
+	if error := match_sorter.search_context_init(
+		&state.search,
+		search_reserve_size,
+		search_commit_size,
+	); error != nil {
+		mem_virtual.arena_destroy(&state.session)
+		delete(state.results)
+		delete(state.query_bytes)
+		delete(state.ranked_indices)
+		state^ = {}
+		return error
+	}
+	return nil
 }
 
 close :: proc(state: ^State) {
 	if state == nil {return}
-	clear_entries(state)
 	clear(&state.results)
-	delete(state.query_text, state.allocator)
-	state.query_text = ""
+	clear(&state.ranked_indices)
+	state.entries = nil
+	mem_virtual.arena_free_all(&state.session)
+	clear(&state.query_bytes)
 	state.active_context = 0
 	state.selected = -1
 	state.open = false
@@ -120,9 +138,11 @@ close :: proc(state: ^State) {
 state_destroy :: proc(state: ^State) {
 	if state == nil {return}
 	close(state)
-	delete(state.entries)
 	delete(state.results)
+	delete(state.query_bytes)
+	delete(state.ranked_indices)
 	match_sorter.search_context_destroy(&state.search)
+	mem_virtual.arena_destroy(&state.session)
 	state^ = {}
 }
 
@@ -164,7 +184,7 @@ first_available_result :: proc(state: ^State) -> int {
 
 rebuild_results :: proc(state: ^State) {
 	clear(&state.results)
-	if len(state.query_text) == 0 {
+	if len(state.query_bytes) == 0 {
 		for &entry in state.entries {
 			append(&state.results, Result{
 				entry = &entry,
@@ -178,15 +198,14 @@ rebuild_results :: proc(state: ^State) {
 			{getter = entry_category},
 			{getter = entry_keywords},
 		}
-		indices := match_sorter.match_indices(
+		match_sorter.match_indices_into_typed(
 			&state.search,
 			state.entries[:],
-			state.query_text,
+			string(state.query_bytes[:]),
 			match_sorter.Typed_Options(Entry){keys = keys},
-			state.allocator,
+			&state.ranked_indices,
 		)
-		defer delete(indices, state.allocator)
-		for index in indices {
+		for index in state.ranked_indices {
 			entry := &state.entries[index]
 			append(&state.results, Result{
 				entry = entry,
@@ -204,7 +223,9 @@ open :: proc(
 ) {
 	assert(state != nil && state.search.initialized, "Call command_palette.state_init before open")
 	close(state)
-	for entry in entries {append(&state.entries, clone_entry(entry, state.allocator))}
+	session_allocator := mem_virtual.arena_allocator(&state.session)
+	state.entries = make([dynamic]Entry, 0, len(entries), session_allocator)
+	for entry in entries {append(&state.entries, clone_entry(entry, session_allocator))}
 	state.active_context = active_context
 	state.open = true
 	rebuild_results(state)
@@ -216,13 +237,13 @@ is_open :: proc(state: ^State) -> bool {
 
 query :: proc(state: ^State) -> string {
 	if state == nil || !state.open {return ""}
-	return state.query_text
+	return string(state.query_bytes[:])
 }
 
 set_query :: proc(state: ^State, value: string) {
 	if state == nil || !state.open {return}
-	delete(state.query_text, state.allocator)
-	state.query_text = strings.clone(value, state.allocator)
+	resize(&state.query_bytes, len(value))
+	copy(state.query_bytes[:], transmute([]u8)value)
 	rebuild_results(state)
 }
 
