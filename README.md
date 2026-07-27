@@ -50,7 +50,12 @@ entries := []command_palette.Entry{
 	},
 }
 
-command_palette.open(&palette, entries, CONTEXT_CREATE | CONTEXT_PLAYER)
+search_error := command_palette.open(
+	&palette,
+	entries,
+	CONTEXT_CREATE | CONTEXT_PLAYER,
+)
+assert(search_error == .None)
 ```
 
 `visible_results` returns borrowed results in match-sorter order. A disabled result remains visible with its reason. Selection procedures skip disabled results.
@@ -67,8 +72,19 @@ Results and their entry pointers remain valid until the next state mutation.
 
 One state supports sequential searches. Use one state per thread. The package owns one match-sorter search context and releases it in `state_destroy`.
 
+## UTF-8 errors
+
+`open` validates titles, subtitles, categories, and keywords before it changes the active session.
+`set_query` validates the new query before it changes visible results.
+
+Both procedures return `match_sorter.Search_Error`.
+Invalid UTF-8 leaves the prior session state unchanged.
+
 ## Verification
 
 ```sh
-odin test . -collection:match_sorter=../hw_odin_matchSorter
+./test.sh
 ```
+
+The test command rejects a missing, mismatched, or dirty Match Sorter checkout.
+Use `./scripts/dependencies.sh update` after both library test suites pass.

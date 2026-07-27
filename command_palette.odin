@@ -175,6 +175,20 @@ entry_keywords :: proc(entry: ^Entry) -> match_sorter.Extracted_Values {
 	return match_sorter.many_values(entry.keywords)
 }
 
+entries_have_valid_utf8 :: proc(entries: []Entry) -> bool {
+	for entry in entries {
+		if !match_sorter.valid_utf8(entry.title) ||
+		   !match_sorter.valid_utf8(entry.subtitle) ||
+		   !match_sorter.valid_utf8(entry.category) {
+			return false
+		}
+		for keyword in entry.keywords {
+			if !match_sorter.valid_utf8(keyword) {return false}
+		}
+	}
+	return true
+}
+
 first_available_result :: proc(state: ^State) -> int {
 	for result, index in state.results {
 		if result.available {return index}
@@ -182,9 +196,10 @@ first_available_result :: proc(state: ^State) -> int {
 	return -1
 }
 
-rebuild_results :: proc(state: ^State) {
-	clear(&state.results)
+rebuild_results :: proc(state: ^State) -> match_sorter.Search_Error {
 	if len(state.query_bytes) == 0 {
+		clear(&state.ranked_indices)
+		clear(&state.results)
 		for &entry in state.entries {
 			append(&state.results, Result{
 				entry = &entry,
@@ -192,19 +207,21 @@ rebuild_results :: proc(state: ^State) {
 			})
 		}
 	} else {
-		keys := []match_sorter.Typed_Key(Entry) {
+		keys := []match_sorter.Key(Entry) {
 			{getter = entry_title},
 			{getter = entry_subtitle},
 			{getter = entry_category},
 			{getter = entry_keywords},
 		}
-		match_sorter.match_indices_into_typed(
+		search_error := match_sorter.match_indices_into(
 			&state.search,
 			state.entries[:],
 			string(state.query_bytes[:]),
-			match_sorter.Typed_Options(Entry){keys = keys},
+			match_sorter.Options(Entry){keys = keys},
 			&state.ranked_indices,
 		)
+		if search_error != .None {return search_error}
+		clear(&state.results)
 		for index in state.ranked_indices {
 			entry := &state.entries[index]
 			append(&state.results, Result{
@@ -214,21 +231,23 @@ rebuild_results :: proc(state: ^State) {
 		}
 	}
 	state.selected = first_available_result(state)
+	return .None
 }
 
 open :: proc(
 	state: ^State,
 	entries: []Entry,
 	active_context: Context_Mask,
-) {
+) -> match_sorter.Search_Error {
 	assert(state != nil && state.search.initialized, "Call command_palette.state_init before open")
+	if !entries_have_valid_utf8(entries) {return .Invalid_UTF8}
 	close(state)
 	session_allocator := mem_virtual.arena_allocator(&state.session)
 	state.entries = make([dynamic]Entry, 0, len(entries), session_allocator)
 	for entry in entries {append(&state.entries, clone_entry(entry, session_allocator))}
 	state.active_context = active_context
 	state.open = true
-	rebuild_results(state)
+	return rebuild_results(state)
 }
 
 is_open :: proc(state: ^State) -> bool {
@@ -240,17 +259,25 @@ query :: proc(state: ^State) -> string {
 	return string(state.query_bytes[:])
 }
 
-set_query :: proc(state: ^State, value: string) {
-	if state == nil || !state.open {return}
+set_query :: proc(
+	state: ^State,
+	value: string,
+) -> match_sorter.Search_Error {
+	if state == nil || !state.open {return .None}
+	if !match_sorter.valid_utf8(value) ||
+	   !entries_have_valid_utf8(state.entries[:]) {
+		return .Invalid_UTF8
+	}
 	resize(&state.query_bytes, len(value))
 	copy(state.query_bytes[:], transmute([]u8)value)
-	rebuild_results(state)
+	return rebuild_results(state)
 }
 
 set_context :: proc(state: ^State, active_context: Context_Mask) {
 	if state == nil || !state.open {return}
 	state.active_context = active_context
-	rebuild_results(state)
+	search_error := rebuild_results(state)
+	assert(search_error == .None, "Validated command palette state became invalid")
 }
 
 visible_results :: proc(state: ^State) -> []Result {

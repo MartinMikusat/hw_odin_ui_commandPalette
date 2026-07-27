@@ -2,6 +2,7 @@ package command_palette
 
 import "core:mem"
 import "core:testing"
+import match_sorter "match_sorter:."
 
 context_mask :: proc(bit: u64) -> Context_Mask {
 	return Context_Mask(bit)
@@ -52,7 +53,7 @@ empty_query_preserves_registration_order_and_disabled_rows_test :: proc(t: ^test
 		entry(2, "Play Exercise", "Exercise", Context_Condition{all = play}, "Available in Play mode"),
 		entry(3, "Open Data Folder"),
 	}
-	open(&state, entries, create)
+	testing.expect_value(t, open(&state, entries, create), match_sorter.Search_Error.None)
 	results := visible_results(&state)
 	testing.expect_value(t, len(results), 3)
 	testing.expect_value(t, results[0].entry.id, Entry_ID(1))
@@ -71,14 +72,14 @@ match_sorter_searches_title_subtitle_category_and_keywords_test :: proc(t: ^test
 		{id=2, title="Breath Support", subtitle="Exercise from lesson", category="Exercise"},
 		{id=3, title="Appoggio Lesson", category="Source", keywords=[]string{"abc123", "youtube"}},
 	}
-	open(&state, entries, 0)
-	set_query(&state, "abc123")
+	testing.expect_value(t, open(&state, entries, 0), match_sorter.Search_Error.None)
+	testing.expect_value(t, set_query(&state, "abc123"), match_sorter.Search_Error.None)
 	results := visible_results(&state)
 	testing.expect_value(t, len(results), 1)
 	testing.expect_value(t, results[0].entry.id, Entry_ID(3))
-	set_query(&state, "range start")
+	testing.expect_value(t, set_query(&state, "range start"), match_sorter.Search_Error.None)
 	testing.expect_value(t, visible_results(&state)[0].entry.id, Entry_ID(1))
-	set_query(&state, "exercise")
+	testing.expect_value(t, set_query(&state, "exercise"), match_sorter.Search_Error.None)
 	testing.expect_value(t, visible_results(&state)[0].entry.id, Entry_ID(2))
 }
 
@@ -94,7 +95,7 @@ navigation_skips_disabled_results_test :: proc(t: ^testing.T) {
 		entry(2, "Disabled", condition = disabled, reason = "Unavailable"),
 		entry(3, "Third"),
 	}
-	open(&state, entries, active)
+	testing.expect_value(t, open(&state, entries, active), match_sorter.Search_Error.None)
 	testing.expect(t, move_selection(&state, 1))
 	testing.expect_value(t, selected_index(&state), 2)
 	testing.expect(t, move_selection(&state, -1))
@@ -112,7 +113,7 @@ all_disabled_results_have_no_selection_test :: proc(t: ^testing.T) {
 		entry(1, "One", condition = Context_Condition{all = context_mask(2)}),
 		entry(2, "Two", condition = Context_Condition{all = context_mask(2)}),
 	}
-	open(&state, entries, context_mask(1))
+	testing.expect_value(t, open(&state, entries, context_mask(1)), match_sorter.Search_Error.None)
 	testing.expect_value(t, selected_index(&state), -1)
 	testing.expect(t, !move_selection(&state, 1))
 	_, activated := activate_selected(&state)
@@ -125,7 +126,11 @@ activation_returns_opaque_id_and_closes_test :: proc(t: ^testing.T) {
 	state: State
 	testing.expect(t, state_init(&state) == nil)
 	defer state_destroy(&state)
-	open(&state, []Entry{entry(42, "Open Data Folder")}, 0)
+	testing.expect_value(
+		t,
+		open(&state, []Entry{entry(42, "Open Data Folder")}, 0),
+		match_sorter.Search_Error.None,
+	)
 	id, activated := activate_selected(&state)
 	testing.expect(t, activated)
 	testing.expect_value(t, id, Entry_ID(42))
@@ -138,13 +143,59 @@ query_and_entry_data_are_owned_by_state_test :: proc(t: ^testing.T) {
 	testing.expect(t, state_init(&state) == nil)
 	defer state_destroy(&state)
 	title := []u8{'S', 'o', 'u', 'r', 'c', 'e'}
-	open(&state, []Entry{entry(1, string(title))}, 0)
+	testing.expect_value(
+		t,
+		open(&state, []Entry{entry(1, string(title))}, 0),
+		match_sorter.Search_Error.None,
+	)
 	title[0] = 'X'
 	testing.expect_value(t, visible_results(&state)[0].entry.title, "Source")
 	query_input := []u8{'s', 'o', 'u'}
-	set_query(&state, string(query_input))
+	testing.expect_value(
+		t,
+		set_query(&state, string(query_input)),
+		match_sorter.Search_Error.None,
+	)
 	query_input[0] = 'x'
 	testing.expect_value(t, query(&state), "sou")
+}
+
+@(test)
+invalid_utf8_rejection_preserves_open_state_test :: proc(t: ^testing.T) {
+	state: State
+	testing.expect(t, state_init(&state) == nil)
+	defer state_destroy(&state)
+	testing.expect_value(
+		t,
+		open(&state, []Entry{entry(1, "Source")}, 0),
+		match_sorter.Search_Error.None,
+	)
+	testing.expect_value(
+		t,
+		set_query(&state, "sou"),
+		match_sorter.Search_Error.None,
+	)
+
+	invalid_bytes := []byte{0xe2, 0x82}
+	invalid := transmute(string)invalid_bytes
+	testing.expect_value(
+		t,
+		set_query(&state, invalid),
+		match_sorter.Search_Error.Invalid_UTF8,
+	)
+	testing.expect_value(t, query(&state), "sou")
+	testing.expect_value(t, visible_results(&state)[0].entry.id, Entry_ID(1))
+
+	invalid_entries := []Entry{
+		entry(2, "Invalid", keywords = []string{invalid}),
+	}
+	testing.expect_value(
+		t,
+		open(&state, invalid_entries, 0),
+		match_sorter.Search_Error.Invalid_UTF8,
+	)
+	testing.expect_value(t, query(&state), "sou")
+	testing.expect_value(t, visible_results(&state)[0].entry.id, Entry_ID(1))
 }
 
 @(test)
@@ -156,13 +207,21 @@ session_arena_resets_and_releases_extra_blocks_test :: proc(t: ^testing.T) {
 	large_title := make([]u8, int(2 * mem.Megabyte))
 	defer delete(large_title)
 	for &value in large_title {value = 'a'}
-	open(&state, []Entry{entry(1, string(large_title))}, 0)
+	testing.expect_value(
+		t,
+		open(&state, []Entry{entry(1, string(large_title))}, 0),
+		match_sorter.Search_Error.None,
+	)
 	testing.expect(t, state.session.total_used > 0)
 	testing.expect(t, state.session.total_reserved > initial_reserved)
 	close(&state)
 	testing.expect_value(t, state.session.total_used, uint(0))
 	testing.expect_value(t, state.session.total_reserved, initial_reserved)
-	open(&state, []Entry{entry(2, "Reopened")}, 0)
+	testing.expect_value(
+		t,
+		open(&state, []Entry{entry(2, "Reopened")}, 0),
+		match_sorter.Search_Error.None,
+	)
 	testing.expect_value(t, visible_results(&state)[0].entry.id, Entry_ID(2))
 }
 
@@ -177,16 +236,16 @@ query_results_and_ranked_indices_reuse_capacity_test :: proc(t: ^testing.T) {
 		entry(3, "help"),
 		entry(4, "sup"),
 	}
-	open(&state, entries, 0)
+	testing.expect_value(t, open(&state, entries, 0), match_sorter.Search_Error.None)
 	results_buffer := raw_data(state.results[:])
 	results_capacity := cap(state.results)
-	set_query(&state, "h")
-	set_query(&state, "hello")
+	testing.expect_value(t, set_query(&state, "h"), match_sorter.Search_Error.None)
+	testing.expect_value(t, set_query(&state, "hello"), match_sorter.Search_Error.None)
 	query_buffer := raw_data(state.query_bytes[:])
 	query_capacity := cap(state.query_bytes)
 	ranked_buffer := raw_data(state.ranked_indices[:])
 	ranked_capacity := cap(state.ranked_indices)
-	set_query(&state, "he")
+	testing.expect_value(t, set_query(&state, "he"), match_sorter.Search_Error.None)
 	testing.expect(t, raw_data(state.results[:]) == results_buffer)
 	testing.expect_value(t, cap(state.results), results_capacity)
 	testing.expect(t, raw_data(state.query_bytes[:]) == query_buffer)
