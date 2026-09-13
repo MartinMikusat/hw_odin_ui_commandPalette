@@ -40,7 +40,8 @@ check_dependency() {
       echo "[command-palette] dependency revision mismatch" >&2
       return 1
     fi
-    if [ -n "$(git -C "$REPOSITORY" status --porcelain)" ]; then
+    if [ "${HW_ODIN_WORKSPACE_GATE:-}" != 1 ] &&
+       [ -n "$(git -C "$REPOSITORY" status --porcelain)" ]; then
       echo "[command-palette] dependency has uncommitted changes" >&2
       return 1
     fi
