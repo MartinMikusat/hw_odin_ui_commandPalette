@@ -2,12 +2,6 @@
 
 A renderer-independent Odin library for searchable, context-aware application commands and data.
 
-## AI-assisted development disclosure
-
-Models used:
-
-- **GPT-5.6-Sol**
-
 The package uses `hw_odin_matchSorter` to rank entry titles, subtitles, categories, and keywords. Applications supply opaque entry identifiers and context bits. The package never executes application code or draws interface elements.
 
 ## Integration

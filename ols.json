@@ -1,6 +1,21 @@
 {
-    "$schema": "https://raw.githubusercontent.com/DanielGavin/ols/master/misc/ols.schema.json",
-    "enable_document_symbols": true,
-    "enable_hover": true,
-    "enable_snippets": true
+  "$schema": "https://raw.githubusercontent.com/DanielGavin/ols/master/misc/ols.schema.json",
+  "enable_document_symbols": true,
+  "enable_hover": true,
+  "enable_snippets": true,
+  "collections": [
+    {
+      "name": "match_sorter",
+      "path": "../hw_odin_matchSorter"
+    }
+  ],
+  "profile": "default",
+  "profiles": [
+    {
+      "name": "default",
+      "checker_path": [
+        "."
+      ]
+    }
+  ]
 }
